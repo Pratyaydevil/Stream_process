@@ -1,12 +1,17 @@
-from datetime import datetime, timezone
+import asyncio
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import psycopg
-from kafka import KafkaProducer
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+try:
+    from kafka import KafkaProducer
+except Exception:  # pragma: no cover - optional dependency for local/test environments
+    KafkaProducer = None
 
 DATABASE_URL = (
     f"postgresql://{os.getenv('POSTGRES_USER', 'streampulse')}:{os.getenv('POSTGRES_PASSWORD', 'change_me')}"
@@ -24,10 +29,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+active_connections: set[WebSocket] = set()
+
+
+async def send_dashboard_update(payload: dict[str, Any]) -> None:
+    disconnected: list[WebSocket] = []
+    for connection in list(active_connections):
+        try:
+            await connection.send_json(payload)
+        except Exception:
+            disconnected.append(connection)
+    for connection in disconnected:
+        active_connections.discard(connection)
+
+
+def trigger_dashboard_refresh() -> None:
+    payload = {"type": "refresh"}
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(send_dashboard_update(payload))
+    else:
+        loop.create_task(send_dashboard_update(payload))
+
 
 @app.on_event("startup")
 def migrate_schema() -> None:
     query_database("ALTER TABLE events ADD COLUMN IF NOT EXISTS algorithm TEXT NOT NULL DEFAULT 'heuristic'")
+
+
+@app.websocket("/ws")
+async def dashboard_websocket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    active_connections.add(websocket)
+    await websocket.send_json({"type": "connected", "message": "live updates enabled"})
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        active_connections.discard(websocket)
 
 
 class Event(BaseModel):
@@ -81,6 +121,9 @@ def ingest_event(event: Event) -> Event:
 @app.post("/api/ingest", status_code=202)
 def ingest_stream(event: Event) -> dict[str, str]:
     try:
+        if KafkaProducer is None:
+            raise RuntimeError("kafka-python is unavailable")
+
         producer = KafkaProducer(
             bootstrap_servers=KAFKA_BROKERS,
             value_serializer=lambda value: value.model_dump_json().encode(),
@@ -88,6 +131,7 @@ def ingest_stream(event: Event) -> dict[str, str]:
         producer.send(KAFKA_TOPIC, key=event.user_id.encode(), value=event)
         producer.flush()
         producer.close()
+        trigger_dashboard_refresh()
         return {"status": "accepted", "event_id": event.event_id}
     except Exception as error:
         raise HTTPException(status_code=503, detail=f"stream unavailable: {error}") from error

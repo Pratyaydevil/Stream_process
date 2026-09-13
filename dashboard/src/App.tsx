@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Activity, AlertTriangle, ArrowUpRight, BrainCircuit, IndianRupee, RefreshCw, Send, ShoppingBag, Users } from 'lucide-react';
 
 type Kpis = { revenue: number; orders: number; active_customers: number; aov: number; basket_size: number; anomalies: number };
@@ -16,6 +16,7 @@ function App() {
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState('');
   const [form, setForm] = useState({ user_id: 'U-INPUT', product_id: 'P-INPUT', amount: '2499', quantity: '1', category: 'Electronics', location: 'Bangalore', device: 'web', algorithm: 'isolation_forest' });
+  const socketRef = useRef<WebSocket | null>(null);
 
   async function refresh() {
     setLoading(true);
@@ -28,7 +29,24 @@ function App() {
     setLoading(false);
   }
 
-  useEffect(() => { refresh(); const timer = window.setInterval(refresh, 10000); return () => window.clearInterval(timer); }, []);
+  useEffect(() => {
+    refresh();
+    const timer = window.setInterval(refresh, 10000);
+    const socketUrl = import.meta.env.DEV ? 'ws://localhost:8000/ws' : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
+    const socket = new WebSocket(socketUrl);
+    socketRef.current = socket;
+
+    socket.onmessage = (event) => {
+      const payload = JSON.parse(event.data);
+      if (payload.type === 'refresh') refresh();
+      if (payload.type === 'connected') console.info(payload.message);
+    };
+
+    return () => {
+      socket.close();
+      window.clearInterval(timer);
+    };
+  }, []);
 
   async function submitEvent(event: FormEvent) {
     event.preventDefault();

@@ -78,9 +78,11 @@ services:
       KAFKA_TRANSACTIONS_TOPIC: transactions
       API_URL: http://api:8000
     command:
-      - spark-submit
+      - /opt/spark/bin/spark-submit
       - --master
       - local[*]
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy2
       - --packages
       - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3
       - /opt/spark/jobs/spark_processor.py
